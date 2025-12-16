@@ -5,7 +5,7 @@ import cors from 'cors';
 import { GoogleGenAI } from '@google/genai';
 
 const app = express();
-const PORT = 3000;
+// const PORT = 3000;
 
 // ===== MIDDLEWARE =====
 const allowedOrigins = process.env.FRONTEND_URL
@@ -126,6 +126,6 @@ app.post("/generate-from-audio", upload.single("audio"), async (req, res) => {
 });
 
 // ===== START SERVER =====
-app.listen(PORT, () => {
-  console.log(`Server berjalan pada port ${PORT}`);
-});
+// app.listen(PORT, () => {
+//   console.log(`Server berjalan pada port ${PORT}`);
+// });
