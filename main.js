@@ -5,130 +5,177 @@ import cors from 'cors';
 import { GoogleGenAI } from '@google/genai';
 
 const app = express();
-// const PORT = 3000;
 
-// ===== MIDDLEWARE =====
-const allowedOrigins = process.env.FRONTEND_URL
-  ?.split(',')
-  .map(o => o.trim());
+/* =========================
+   CONFIG
+========================= */
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const MAX_BODY_SIZE = "4mb";
+
+/* =========================
+   INIT
+========================= */
+const upload = multer({ limits: { fileSize: 4 * 1024 * 1024 } });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+/* =========================
+   MIDDLEWARE
+========================= */
+const allowedOrigins = (process.env.FRONTEND_URL || "")
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
 
 app.use(cors({
-  origin: (origin, callback) => {
-    // allow server-to-server / curl
+  origin(origin, callback) {
+    // allow curl / server-to-server
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("Not allowed by CORS"));
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return callback(null, true);
     }
+
+    callback(new Error("Not allowed by CORS"));
   },
-  methods: ["GET", "POST"]
+  methods: ["GET", "POST"],
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: MAX_BODY_SIZE }));
+app.use(express.urlencoded({ extended: true, limit: MAX_BODY_SIZE }));
 
-// ===== INIT =====
-const upload = multer();
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const GEMINI_MODEL = "gemini-2.5-flash";
+/* =========================
+   HELPERS
+========================= */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// ===== ROUTES =====
-app.post('/generate-text', async (req, res) => {
-  const { prompt } = req.body;
-
-  if (!prompt) {
-    return res.status(400).json({ message: "Prompt is required" });
-  }
-
+async function generateContent({ contents, retries = 3 }) {
   try {
-    const response = await ai.models.generateContent({
+    return await ai.models.generateContent({
       model: GEMINI_MODEL,
-      contents: prompt
+      contents
     });
-
-    res.json({ result: response.text });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
+    if (retries === 0) throw err;
+
+    // retry only on overload
+    if (err.message?.includes("503")) {
+      await sleep(1000);
+      return generateContent({ contents, retries: retries - 1 });
+    }
+
+    throw err;
   }
+}
+
+function asyncHandler(fn) {
+  return (req, res, next) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+/* =========================
+   ROUTES
+========================= */
+app.get('/', (_, res) => {
+  res.json({ status: "ok" });
 });
 
-app.post("/generate-from-image", upload.single("image"), async (req, res) => {
-  const { prompt } = req.body;
+app.post(
+  '/generate-text',
+  asyncHandler(async (req, res) => {
+    const { prompt } = req.body;
+    if (!prompt) {
+      return res.status(400).json({ message: "Prompt is required" });
+    }
 
-  if (!req.file) {
-    return res.status(400).json({ message: "Image is required" });
-  }
-
-  const base64Image = req.file.buffer.toString("base64");
-
-  try {
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        { text: prompt ?? "Jelaskan gambar ini", type: "text" },
-        { inlineData: { data: base64Image, mimeType: req.file.mimetype } }
-      ],
-    });
-
+    const response = await generateContent({ contents: prompt });
     res.json({ result: response.text });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
-  }
-});
+  })
+);
 
-app.post("/generate-from-document", upload.single("document"), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ message: "Document is required" });
-  }
+app.post(
+  '/generate-from-image',
+  upload.single("image"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ message: "Image is required" });
+    }
 
-  const base64Document = req.file.buffer.toString("base64");
+    const contents = [
+      { text: req.body.prompt || "Jelaskan gambar ini", type: "text" },
+      {
+        inlineData: {
+          data: req.file.buffer.toString("base64"),
+          mimeType: req.file.mimetype
+        }
+      }
+    ];
 
-  try {
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        { text: "Buat ringkasan dari dokumen berikut.", type: "text" },
-        { inlineData: { data: base64Document, mimeType: req.file.mimetype } }
-      ],
-    });
-
+    const response = await generateContent({ contents });
     res.json({ result: response.text });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
-  }
-});
+  })
+);
 
-app.post("/generate-from-audio", upload.single("audio"), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ message: "Audio is required" });
-  }
+app.post(
+  '/generate-from-document',
+  upload.single("document"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ message: "Document is required" });
+    }
 
-  const base64Audio = req.file.buffer.toString("base64");
+    const contents = [
+      { text: "Buat ringkasan dari dokumen berikut.", type: "text" },
+      {
+        inlineData: {
+          data: req.file.buffer.toString("base64"),
+          mimeType: req.file.mimetype
+        }
+      }
+    ];
 
-  try {
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [
-        { text: "Buat transkrip dari rekaman tersebut.", type: "text" },
-        { inlineData: { data: base64Audio, mimeType: req.file.mimetype } }
-      ],
-    });
-
+    const response = await generateContent({ contents });
     res.json({ result: response.text });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
+  })
+);
+
+app.post(
+  '/generate-from-audio',
+  upload.single("audio"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ message: "Audio is required" });
+    }
+
+    const contents = [
+      { text: "Buat transkrip dari rekaman tersebut.", type: "text" },
+      {
+        inlineData: {
+          data: req.file.buffer.toString("base64"),
+          mimeType: req.file.mimetype
+        }
+      }
+    ];
+
+    const response = await generateContent({ contents });
+    res.json({ result: response.text });
+  })
+);
+
+/* =========================
+   ERROR HANDLER
+========================= */
+app.use((err, req, res, next) => {
+  console.error(err);
+
+  if (err.message === "Not allowed by CORS") {
+    return res.status(403).json({ message: err.message });
   }
+
+  if (err.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({ message: "File too large" });
+  }
+
+  res.status(500).json({ message: err.message || "Internal Server Error" });
 });
-
-//  ===== START SERVER =====
-// app.listen(PORT, () => {
-//   console.log(`Server berjalan pada port ${PORT}`);
-// });
-
 
 export default app;
